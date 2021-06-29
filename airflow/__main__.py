@@ -33,12 +33,14 @@ def main():
     if conf.get("core", "security") == 'kerberos':
         os.environ['KRB5CCNAME'] = conf.get('kerberos', 'ccache')
         os.environ['KRB5_KTNAME'] = conf.get('kerberos', 'keytab')
-
+    # cmd 可以根据airflow脚本命令进行初始化，方便本地debug
+    cmd =["webserver", "--port", "8080"]
     parser = cli_parser.get_parser()
     argcomplete.autocomplete(parser)
-    args = parser.parse_args()
+    args = parser.parse_args(cmd)
     args.func(args)
 
 
 if __name__ == '__main__':
+    # 此为airflow脚本执行的入口，可以构造airflow脚本执行命令，进行本地debug
     main()
