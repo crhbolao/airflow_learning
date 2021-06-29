@@ -994,6 +994,8 @@ def do_setup() -> None:
     """
     setup_kwargs = {}
 
+    #  通过 INSTALL_PROVIDERS_FROM_SOURCES 参数决定安装airflow providers时是否通过源码安装
+    #  可以验证下该功能，如果可以从源码安装providers，则不需要再一个个打补丁。
     def include_provider_namespace_packages_when_installing_from_sources() -> None:
         """
         When installing providers from sources we install all namespace packages found below airflow,
