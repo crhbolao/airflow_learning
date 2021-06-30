@@ -78,6 +78,7 @@ class BaseExecutor(LoggingMixin):
         queue: Optional[str] = None,
     ):
         """Queues command to task"""
+        # 只有任务不存在队列中同时也不在运行过程中，才将任务放到队列中
         if task_instance.key not in self.queued_tasks and task_instance.key not in self.running:
             self.log.info("Adding to queue: %s", command)
             self.queued_tasks[task_instance.key] = (command, priority, queue, task_instance)
@@ -139,11 +140,13 @@ class BaseExecutor(LoggingMixin):
 
     def heartbeat(self) -> None:
         """Heartbeat sent to trigger new jobs."""
+        # 如果没有设置parallelism的话，则open_slots为队列中任务的个数。否则的话为设置的parallelism - 正在运行的任务个数
         if not self.parallelism:
             open_slots = len(self.queued_tasks)
         else:
             open_slots = self.parallelism - len(self.running)
 
+        # 统计正在运行的任务个数和在队列中的任务个数
         num_running_tasks = len(self.running)
         num_queued_tasks = len(self.queued_tasks)
 
@@ -155,10 +158,12 @@ class BaseExecutor(LoggingMixin):
         Stats.gauge('executor.queued_tasks', num_queued_tasks)
         Stats.gauge('executor.running_tasks', num_running_tasks)
 
+        # 触发任务
         self.trigger_tasks(open_slots)
 
         # Calling child class sync method
         self.log.debug("Calling the %s sync method", self.__class__)
+        # 同步状态
         self.sync()
 
     def order_queued_tasks_by_priority(self) -> List[Tuple[TaskInstanceKey, QueuedTaskInstanceType]]:
@@ -179,12 +184,16 @@ class BaseExecutor(LoggingMixin):
 
         :param open_slots: Number of open slots
         """
+        # 根据任务优先级对任务进行排序
         sorted_queue = self.order_queued_tasks_by_priority()
 
         for _ in range(min((open_slots, len(self.queued_tasks)))):
+            # 从排序过的任务中获取第一个任务
             key, (command, _, queue, ti) = sorted_queue.pop(0)
+            # 根据task key, 从任务队列中移除，并加入到正在运行的任务队列中。
             self.queued_tasks.pop(key)
             self.running.add(key)
+            # 调用 execute_async() 来执行命令
             self.execute_async(key=key, command=command, queue=queue, executor_config=ti.executor_config)
 
     def change_state(self, key: TaskInstanceKey, state: str, info=None) -> None:
