@@ -44,6 +44,7 @@ def lazy_load_command(import_path: str) -> Callable:
     _, _, name = import_path.rpartition('.')
 
     def command(*args, **kwargs):
+        # 类似java中的反射，
         func = import_string(import_path)
         return func(*args, **kwargs)
 

@@ -51,10 +51,13 @@ class SequentialExecutor(BaseExecutor):
         queue: Optional[str] = None,
         executor_config: Optional[Any] = None,
     ) -> None:
+        # 校验 command, 判断command的前三个是否为：["airflow", "tasks", "run"]
         self.validate_command(command)
+        # 将command添加到commands_to_run中。
         self.commands_to_run.append((key, command))
 
     def sync(self) -> None:
+        # 遍历commands_to_run，并依次调用子进程执行。所以sequentialExecutor是在单进程中依次执行。
         for key, command in self.commands_to_run:
             self.log.info("Executing command: %s", command)
 

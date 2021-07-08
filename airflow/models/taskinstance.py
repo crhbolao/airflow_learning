@@ -1257,6 +1257,7 @@ class TaskInstance(Base, LoggingMixin):  # pylint: disable=R0902,R0904
         """Prepare Task for Execution"""
         from airflow.models.renderedtifields import RenderedTaskInstanceFields
 
+        # 返回自定的Operator
         task_copy = task.prepare_for_execution()
         self.task = task_copy
 
@@ -1910,6 +1911,7 @@ class TaskInstance(Base, LoggingMixin):  # pylint: disable=R0902,R0904
         :param session: Sqlalchemy ORM Session
         :type session: Session
         """
+        #  这里日期设置为未来一个时间，到时才可以被其他task发现
         if execution_date and execution_date < self.execution_date:
             raise ValueError(
                 'execution_date can not be in the past (current '

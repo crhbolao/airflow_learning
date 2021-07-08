@@ -26,8 +26,10 @@ import shlex
 import signal
 import subprocess
 import sys
-import termios
-import tty
+
+if os.name != "nt":
+    import termios
+    import tty
 from contextlib import contextmanager
 from typing import Dict, List
 

@@ -226,13 +226,24 @@ class DagFileProcessorAgent(LoggingMixin, MultiprocessingStartMethodMixin):
 
         self._last_parsing_stat_received_at: float = time.monotonic()
 
+    # dag解析文件的代理类
     def start(self) -> None:
         """Launch DagFileProcessorManager processor and start DAG parsing loop in manager."""
+        # 获取多进程的启动方法
         mp_start_method = self._get_multiprocessing_start_method()
+
         context = multiprocessing.get_context(mp_start_method)
         self._last_parsing_stat_received_at = time.monotonic()
 
         self._parent_signal_conn, child_signal_conn = context.Pipe()
+
+        # 构造子进程运行_run_processor_manager()，参数依次为：
+        # _dag_directory：dag文件的存放目录
+        # _max_runs：每个dag文件最多解析和调度的次数
+        # _processor_timeout：解析文件超时
+        # dag_ids: 默认为空数据
+        # _pickle_dags：是否要序列化dag
+        # _async_mode: 如果不是sqlite，就是异步模式。
         process = context.Process(
             target=type(self)._run_processor_manager,
             args=(
@@ -249,6 +260,7 @@ class DagFileProcessorAgent(LoggingMixin, MultiprocessingStartMethodMixin):
         )
         self._process = process
 
+        # 启动子进程进行dag文件解析
         process.start()
 
         self.log.info("Launched DagFileProcessorManager with pid: %s", process.pid)
@@ -356,6 +368,8 @@ class DagFileProcessorAgent(LoggingMixin, MultiprocessingStartMethodMixin):
         importlib.reload(airflow.settings)
         airflow.settings.initialize()
         del os.environ['CONFIG_PROCESSOR_MANAGER_LOGGER']
+
+        # 初始化dagfileProcessorManager
         processor_manager = DagFileProcessorManager(
             dag_directory,
             max_runs,
@@ -367,6 +381,7 @@ class DagFileProcessorAgent(LoggingMixin, MultiprocessingStartMethodMixin):
             async_mode,
         )
 
+        # 启动子进程，解析dag文件
         processor_manager.start()
 
     def heartbeat(self) -> None:
@@ -539,6 +554,8 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
         # 30 seconds.
         self.print_stats_interval = conf.getint('scheduler', 'print_stats_interval')
         # How many seconds do we wait for tasks to heartbeat before mark them as zombies.
+
+        # 如果多长时间没有发送心跳的话，就标记为僵尸任务
         self._zombie_threshold_secs = conf.getint('scheduler', 'scheduler_zombie_task_threshold')
 
         # Should store dag file source in a database?
@@ -601,12 +618,17 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
         # Start a new process group
         os.setpgid(0, 0)
 
+        # 设置参数确定解析dag文件的进程数
         self.log.info("Processing files using up to %s processes at a time ", self._parallelism)
+
+        # 调度或者解析文件的最小时间间隔
         self.log.info("Process each file at most once every %s seconds", self._file_process_interval)
+
         self.log.info(
             "Checking for new files in %s every %s seconds", self._dag_directory, self.dag_dir_list_interval
         )
 
+        # 运行解析dag文件的loop
         return self._run_parsing_loop()
 
     def _run_parsing_loop(self):
@@ -617,14 +639,20 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
         else:
             poll_time = None
 
+        # 从新加载airflow dag目录下的dag文件，形成dag列表，并删除元数据中不在列表的信息。
         self._refresh_dag_dir()
+
+        # 准备 dag file 解析列表。
         self.prepare_file_path_queue()
 
+        # 如果是异步模式
         if self._async_mode:
             # If we're in async mode, we can start up straight away. If we're
             # in sync mode we need to be told to start a "loop"
+            # 如果有足够的资源，则启动更多的dag解析器
             self.start_new_processes()
 
+        # 主体循环
         while True:
             loop_start_time = time.monotonic()
 
@@ -669,24 +697,31 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
                 if not processor:
                     continue
 
+                # 获取processor的结果，并将从_processors排除
                 self._collect_results_from_processor(processor)
                 self.waitables.pop(sentinel)
                 self._processors.pop(processor.file_path)
 
+            # 从新加载airflow dag目录下的dag文件，形成dag列表，并删除元数据中不在列表的信息。
             self._refresh_dag_dir()
+
+            # 查找长时间没有发送心跳的task
             self._find_zombies()  # pylint: disable=no-value-for-parameter
 
+            # 强制删除超时的processor
             self._kill_timed_out_processors()
 
             # Generate more file paths to process if we processed all the files
             # already.
+            # 如果当前dag列表已经解析完，则重新生成新的dag列表。
             if not self._file_path_queue:
                 self.emit_metrics()
                 self.prepare_file_path_queue()
 
+            # 启动更多的子进程用来解析DAG文件
             self.start_new_processes()
 
-            # Update number of loop iteration.
+            # Update number of loop iteration.  运行次数加1
             self._num_run += 1
 
             if not self._async_mode:
@@ -695,16 +730,24 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
                 # sending a DagParsingStat message back. This means the Agent
                 # can tell we've got to the end of this iteration when it sees
                 # this type of message
+                # 如果不是异步模式，需要等待所有进程完成。
                 self.wait_until_finished()
 
             # Collect anything else that has finished, but don't kick off any more processors
+
+            # 获取子进程的解析结果
             self.collect_results()
 
+            # 打印子进程的状态
             self._print_stat()
 
+            # 获取已经完成解析的dag文件列表
             all_files_processed = all(self.get_last_finish_time(x) is not None for x in self.file_paths)
+
+            # 判断是否所有文件的解析次数都已经达到最大次数。
             max_runs_reached = self.max_runs_reached()
 
+            # 发送dag文件解析状态（dag文件解析的次数、已经解析完的文件）
             try:
                 self._signal_conn.send(
                     DagParsingStat(
@@ -721,12 +764,14 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
                 # for normal operation (It only drives "max runs")
                 self.log.debug("BlockingIOError received trying to send DagParsingStat, ignoring")
 
+            # 如果达到最大的文件解析次数，直接推出循环。
             if max_runs_reached:
                 self.log.info(
                     "Exiting dag parsing loop as all files have been processed %s times", self._max_runs
                 )
                 break
 
+            # 如果是异步模式
             if self._async_mode:
                 loop_duration = time.monotonic() - loop_start_time
                 if loop_duration < 1:
@@ -749,13 +794,20 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
     def _refresh_dag_dir(self):
         """Refresh file paths from dag dir if we haven't done it for too long."""
         now = timezone.utcnow()
+        # 获取距离上次刷新的间隔时间
         elapsed_time_since_refresh = (now - self.last_dag_dir_refresh_time).total_seconds()
+
+        # 间隔时间超过设置的阈值后，继续一下逻辑
         if elapsed_time_since_refresh > self.dag_dir_list_interval:
             # Build up a list of Python files that could contain DAGs
             self.log.info("Searching for files in %s", self._dag_directory)
+
+            # 获取airflow的dag文件，（包括用户自定义的dag文件，example，smart sensor）
             self._file_paths = list_py_file_paths(self._dag_directory)
             self.last_dag_dir_refresh_time = now
             self.log.info("There are %s files in %s", len(self._file_paths), self._dag_directory)
+
+            # 设置dag文件路径（已经加载到_file_path_queue的文件列表，以及dag文件路径和对应的processor进程）
             self.set_file_paths(self._file_paths)
 
             try:
@@ -764,12 +816,16 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
             except Exception:  # noqa pylint: disable=broad-except
                 self.log.exception("Error removing old import errors")
 
+            # 删除不在dag列表的中的dag模型(airflow数据库中的serialized_dag表)
             SerializedDagModel.remove_deleted_dags(self._file_paths)
+
+            # dag列表下中对应的dag模型设为active（airflow元数据库中的dag表）
             DagModel.deactivate_deleted_dags(self._file_paths)
 
             if self.store_dag_code:
                 from airflow.models.dagcode import DagCode
 
+                # 删除不在dag列表内的存储信息（airfow元数据库中的dag_code表）
                 DagCode.remove_deleted_code(self._file_paths)
 
     def _print_stat(self):
@@ -955,8 +1011,12 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
         :return: None
         """
         self._file_paths = new_file_paths
+
+        # 用来过滤已经加载到_file_path_queue中的 dag文件
         self._file_path_queue = [x for x in self._file_path_queue if x in new_file_paths]
         # Stop processors that are working on deleted files
+
+        # filtered_processors存放 dag文件路径以及对应的processor进程，如果dag文件删除的话，对应的processor进程也需要关闭。
         filtered_processors = {}
         for file_path, processor in self._processors.items():
             if file_path in new_file_paths:
@@ -1015,13 +1075,21 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
 
     def start_new_processes(self):
         """Start more processors if we have enough slots and files to process"""
+
+        # 现有的解析器个数没有超过设置的阈值，且需要解析dag文件的列表不为空。
         while self._parallelism - len(self._processors) > 0 and self._file_path_queue:
+
+            # 从需要解析dag文件的列表中获取一个dag文件。
             file_path = self._file_path_queue.pop(0)
             # Stop creating duplicate processor i.e. processor with the same filepath
+
+            # 如果该文件正在解析中，则跳过。
             if file_path in self._processors.keys():
                 continue
 
             callback_to_execute_for_file = self._callback_to_execute[file_path]
+
+            # 初始化processor
             processor = self._processor_factory(
                 file_path, callback_to_execute_for_file, self._dag_ids, self._pickle_dags
             )
@@ -1029,6 +1097,7 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
             del self._callback_to_execute[file_path]
             Stats.incr('dag_processing.processes')
 
+            # processor启动start
             processor.start()
             self.log.debug("Started a process (PID: %s) to generate tasks for %s", processor.pid, file_path)
             self._processors[file_path] = processor
@@ -1039,6 +1108,8 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
         self._parsing_start_time = time.perf_counter()
         # If the file path is already being processed, or if a file was
         # processed recently, wait until the next batch
+
+        # 获取已经解压的dag文件列表
         file_paths_in_progress = self._processors.keys()
         now = timezone.utcnow()
 
@@ -1047,17 +1118,21 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
 
         files_with_mtime = {}
         file_paths = []
+
+        # 是否更新时间进行dag文件解析排序
         is_mtime_mode = list_mode == "modified_time"
 
         file_paths_recently_processed = []
         for file_path in self._file_paths:
-
+            # 遍历 airflow dag文件列表，根据是否采用更新时间排序策略，将文件分别存放在files_with_mtime 或者 file_paths 中。
             if is_mtime_mode:
                 files_with_mtime[file_path] = os.path.getmtime(file_path)
             else:
                 file_paths.append(file_path)
 
             # Find file paths that were recently processed
+            # 最后一次解析dag文件的时间，如果没有解析过则为None,
+            # 如果距离上一次解析dag文件时间间隔，小于设置的阈值， 则将该dag添加到file_paths_recently_processed中。
             last_finish_time = self.get_last_finish_time(file_path)
             if (
                 last_finish_time is not None
@@ -1066,6 +1141,7 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
                 file_paths_recently_processed.append(file_path)
 
         # Sort file paths via last modified time
+        # 根据排序策略，重新对dag列表进行排序。
         if is_mtime_mode:
             file_paths = sorted(files_with_mtime, key=files_with_mtime.get, reverse=True)
         elif list_mode == "alphabetical":
@@ -1075,20 +1151,24 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
             # set of files. Since we set the seed, the sort order will remain same per host
             random.Random(get_hostname()).shuffle(file_paths)
 
+        # 初始化 dag文件列表 已经达到运行次数的清单
         files_paths_at_run_limit = [
             file_path for file_path, stat in self._file_stats.items() if stat.run_count == self._max_runs
         ]
 
+        # file_paths_recently_processed 和 files_paths_at_run_limit 去重得到 file_paths_to_exclude。
         file_paths_to_exclude = set(file_paths_in_progress).union(
             file_paths_recently_processed, files_paths_at_run_limit
         )
 
         # Do not convert the following list to set as set does not preserve the order
         # and we need to maintain the order of file_paths for `[scheduler] file_parsing_sort_mode`
+        # 获取需要解析dag的文件列表
         files_paths_to_queue = [
             file_path for file_path in file_paths if file_path not in file_paths_to_exclude
         ]
 
+        # 日志打印
         for file_path, processor in self._processors.items():
             self.log.debug(
                 "File path %s is still being processed (started: %s)",
@@ -1098,6 +1178,7 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
 
         self.log.debug("Queuing the following files for processing:\n\t%s", "\n\t".join(files_paths_to_queue))
 
+        # 如果 self._file_stats 不存在解析dag文件，则初始化一个dag file stat
         for file_path in files_paths_to_queue:
             if file_path not in self._file_stats:
                 self._file_stats[file_path] = DagFileStat(
@@ -1113,6 +1194,8 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
         and update the current zombie list.
         """
         now = timezone.utcnow()
+
+        # 如果没有 self._last_zombie_query_time  或者 当前时间 - self._last_zombie_query_time > self._zombie_query_interval
         if (
             not self._last_zombie_query_time
             or (now - self._last_zombie_query_time).total_seconds() > self._zombie_query_interval
@@ -1123,9 +1206,12 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
             self.log.info("Finding 'running' jobs without a recent heartbeat")
             TI = airflow.models.TaskInstance
             DM = airflow.models.DagModel
+
+            # 计算应该汇报心跳的时间
             limit_dttm = timezone.utcnow() - timedelta(seconds=self._zombie_threshold_secs)
             self.log.info("Failing jobs without heartbeat after %s", limit_dttm)
 
+            # 从ariflow 元数据库总获取僵尸任务
             zombies = (
                 session.query(TI, DM.fileloc)
                 .join(LJ, TI.job_id == LJ.id)
@@ -1140,7 +1226,10 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
                 .all()
             )
 
+            # 初始化最近查找僵尸task的运行时间。
             self._last_zombie_query_time = timezone.utcnow()
+
+
             for ti, file_loc in zombies:
                 request = TaskCallbackRequest(
                     full_filepath=file_loc,
@@ -1154,6 +1243,8 @@ class DagFileProcessorManager(LoggingMixin):  # pylint: disable=too-many-instanc
     def _kill_timed_out_processors(self):
         """Kill any file processors that timeout to defend against process hangs."""
         now = timezone.utcnow()
+
+        # 遍历每个子进程，根据起始时间计算duration， 判断子进程是否超时，如果超时的话，直接杀死。
         for file_path, processor in self._processors.items():
             duration = now - processor.start_time
             if duration > self._processor_timeout:

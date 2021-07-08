@@ -522,6 +522,8 @@ class BaseOperator(Operator, LoggingMixin, TaskMixin, metaclass=BaseOperatorMeta
         self.task_id = task_id
         self.label = task_id
         task_group = task_group or TaskGroupContext.get_current_task_group(dag)
+
+        # dag 中包含一组task任务
         if task_group:
             self.task_id = task_group.child_id(task_id)
             task_group.add(self)
@@ -540,6 +542,7 @@ class BaseOperator(Operator, LoggingMixin, TaskMixin, metaclass=BaseOperatorMeta
         if end_date:
             self.end_date = timezone.convert_to_utc(end_date)
 
+        # 校验触发规则
         if not TriggerRule.is_valid(trigger_rule):
             raise AirflowException(
                 "The trigger_rule must be one of {all_triggers},"

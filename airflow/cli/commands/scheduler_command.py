@@ -35,6 +35,10 @@ def scheduler(args):
     skip_serve_logs = args.skip_serve_logs
 
     print(settings.HEADER)
+    # 初始化SchedulerJob
+    # process_subdir：使用参数中的dag目录替换配置文件中的dags_folder
+    # todo num_runs ？？？
+    # todo do_pickle ？？？
     job = SchedulerJob(
         subdir=process_subdir(args.subdir),
         num_runs=args.num_runs,
@@ -42,6 +46,7 @@ def scheduler(args):
     )
 
     if args.daemon:
+        # 创建airflow 相关组件的日志路径
         pid, stdout, stderr, log_file = setup_locations(
             "scheduler", args.pid, args.stdout, args.stderr, args.log_file
         )
@@ -61,9 +66,11 @@ def scheduler(args):
         signal.signal(signal.SIGTERM, sigint_handler)
         signal.signal(signal.SIGQUIT, sigquit_handler)
         sub_proc = _serve_logs(skip_serve_logs)
+        # 启动airflow scheduler job
         job.run()
 
     if sub_proc:
+        # 关闭进程
         sub_proc.terminate()
 
 
@@ -72,6 +79,7 @@ def _serve_logs(skip_serve_logs: bool = False) -> Optional[Process]:
     from airflow.configuration import conf
     from airflow.utils.serve_logs import serve_logs
 
+    # 如果airflow.cfg中配置的executor是["LocalExecutor", "SequentialExecutor"]中，则开启日志服务
     if conf.get("core", "executor") in ["LocalExecutor", "SequentialExecutor"]:
         if skip_serve_logs is False:
             sub_proc = Process(target=serve_logs)

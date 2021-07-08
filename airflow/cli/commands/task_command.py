@@ -60,6 +60,7 @@ def _run_task_by_selected_method(args, dag: DAG, ti: TaskInstance) -> None:
             "Option --raw and --local are mutually exclusive. "
             "Please remove one option to execute the command."
         )
+    # 通过tasK的运行模式，运行task
     if args.local:
         _run_task_by_local_task_job(args, ti)
     elif args.raw:
@@ -220,7 +221,7 @@ def task_run(args, dag=None):
     else:
         # Use DAG from parameter
         pass
-
+    # 从dag中获取对应的task，初始化TaskInstance
     task = dag.get_task(task_id=args.task_id)
     ti = TaskInstance(task, args.execution_date)
     ti.refresh_from_db()

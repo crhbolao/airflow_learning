@@ -110,6 +110,7 @@ class DagBag(LoggingMixin):
 
         super().__init__()
 
+        # 是否需要保存序列化的dag，如果需要则read_dags_from_db同样为true
         if store_serialized_dags:
             warnings.warn(
                 "The store_serialized_dags parameter has been deprecated. "
@@ -134,12 +135,15 @@ class DagBag(LoggingMixin):
 
         self.dagbag_import_error_tracebacks = conf.getboolean('core', 'dagbag_import_error_tracebacks')
         self.dagbag_import_error_traceback_depth = conf.getint('core', 'dagbag_import_error_traceback_depth')
+
+        # 用来加载dag文件
         self.collect_dags(
             dag_folder=dag_folder,
             include_examples=include_examples,
             include_smart_sensor=include_smart_sensor,
             safe_mode=safe_mode,
         )
+
         # Should the extra operator link be loaded via plugins?
         # This flag is set to False in Scheduler so that Extra Operator links are not loaded
         self.load_op_links = load_op_links
@@ -264,13 +268,19 @@ class DagBag(LoggingMixin):
         # if the source file no longer exists in the DB or in the filesystem,
         # return an empty list
         # todo: raise exception?
+
+        # 如果没有dag文件，或者路径不是dag文件，返回空数组
         if filepath is None or not os.path.isfile(filepath):
             return []
 
         try:
             # This failed before in what may have been a git sync
             # race condition
+
+            # 获取路径最后一次修改时间
             file_last_changed_on_disk = datetime.fromtimestamp(os.path.getmtime(filepath))
+
+            # 如果文件最后一次修改时间没有变化，则返回的是空数组
             if (
                 only_if_updated
                 and filepath in self.file_last_changed
@@ -281,16 +291,20 @@ class DagBag(LoggingMixin):
             self.log.exception(e)
             return []
 
+        # 如果不是zip文件，则从文件中加载，如果是zip文件，则从zip文件中加载
         if not zipfile.is_zipfile(filepath):
             mods = self._load_modules_from_file(filepath, safe_mode)
         else:
             mods = self._load_modules_from_zip(filepath, safe_mode)
 
+        # 从dag文件，module中加载dag
         found_dags = self._process_modules(filepath, mods, file_last_changed_on_disk)
 
+        # 记录该dag文件解析的最后一次时间
         self.file_last_changed[filepath] = file_last_changed_on_disk
         return found_dags
 
+    # 从dag文件中解析dag
     def _load_modules_from_file(self, filepath, safe_mode):
         if not might_contain_dag(filepath, safe_mode):
             # Don't want to spam user with skip messages
@@ -308,6 +322,8 @@ class DagBag(LoggingMixin):
             del sys.modules[mod_name]
 
         timeout_msg = f"DagBag import timeout for {filepath} after {self.DAGBAG_IMPORT_TIMEOUT}s"
+
+        # 设置超时时间
         with timeout(self.DAGBAG_IMPORT_TIMEOUT, error_message=timeout_msg):
             try:
                 loader = importlib.machinery.SourceFileLoader(mod_name, filepath)
@@ -481,9 +497,12 @@ class DagBag(LoggingMixin):
         **Note**: The patterns in .airflowignore are treated as
         un-anchored regexes, not shell-like glob patterns.
         """
+
+        # 如果需要从数据库中读取airflow, 则直接退出
         if self.read_dags_from_db:
             return
 
+        # 日志输出dag文件路径
         self.log.info("Filling up the DagBag from %s", dag_folder)
         dag_folder = dag_folder or self.dag_folder
         # Used to store stats around DagBag processing
@@ -491,6 +510,8 @@ class DagBag(LoggingMixin):
 
         # Ensure dag_folder is a str -- it may have been a pathlib.Path
         dag_folder = correct_maybe_zipped(str(dag_folder))
+
+        # 获取该路径下所有有可能的dag python文件
         for filepath in list_py_file_paths(
             dag_folder,
             safe_mode=safe_mode,
@@ -499,10 +520,14 @@ class DagBag(LoggingMixin):
         ):
             try:
                 file_parse_start_dttm = timezone.utcnow()
+
+                # 开始解析dag文件
                 found_dags = self.process_file(filepath, only_if_updated=only_if_updated, safe_mode=safe_mode)
 
                 file_parse_end_dttm = timezone.utcnow()
                 stats.append(
+
+                    # 初始化每个文件的统计信息
                     FileLoadStat(
                         file=filepath.replace(settings.DAGS_FOLDER, ''),
                         duration=file_parse_end_dttm - file_parse_start_dttm,
@@ -514,6 +539,7 @@ class DagBag(LoggingMixin):
             except Exception as e:  # pylint: disable=broad-except
                 self.log.exception(e)
 
+        # 按解析的时间进行排序
         self.dagbag_stats = sorted(stats, key=lambda x: x.duration, reverse=True)
 
     def collect_dags_from_db(self):

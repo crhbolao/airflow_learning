@@ -225,6 +225,7 @@ class BaseJob(Base, LoggingMixin):
 
     def run(self):
         """Starts the job."""
+        # todo Stats.incr(self.__class__.__name__.lower() + '_start', 1, 1), 参数分别表示什么？？？
         Stats.incr(self.__class__.__name__.lower() + '_start', 1, 1)
         # Adding an entry in the DB
         with create_session() as session:
@@ -234,6 +235,7 @@ class BaseJob(Base, LoggingMixin):
             make_transient(self)
 
             try:
+                # 程序的真正执行入口
                 self._execute()
                 # In case of max runs or max duration
                 self.state = State.SUCCESS

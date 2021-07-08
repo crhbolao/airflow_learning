@@ -179,14 +179,20 @@ class DagFileProcessorProcess(AbstractDagFileProcessorProcess, LoggingMixin, Mul
                 # process doesn't work, so changing the thread name instead.
                 threading.current_thread().name = thread_name
 
+                # 日志打印，可以查看进程id对应的解析的dag文件路径
                 log.info("Started process (PID=%s) to work on %s", os.getpid(), file_path)
                 dag_file_processor = DagFileProcessor(dag_ids=dag_ids, log=log)
+
+                # 开始解析dag文件
                 result: Tuple[int, int] = dag_file_processor.process_file(
                     file_path=file_path,
                     pickle_dags=pickle_dags,
                     callback_requests=callback_requests,
                 )
+
+                # 发送解析dag的结果
                 result_channel.send(result)
+
             log.info("Processing %s took %.3f seconds", file_path, timer.duration)
         except Exception:  # pylint: disable=broad-except
             # Log exceptions through the logging framework.
@@ -201,10 +207,13 @@ class DagFileProcessorProcess(AbstractDagFileProcessorProcess, LoggingMixin, Mul
 
     def start(self) -> None:
         """Launch the process and start processing the DAG."""
+        # 获取 multiprocessing 的启动方法
         start_method = self._get_multiprocessing_start_method()
         context = multiprocessing.get_context(start_method)
 
         _parent_channel, _child_channel = context.Pipe(duplex=False)
+
+        # 初始化子进程，运行_run_file_processor方法
         process = context.Process(
             target=type(self)._run_file_processor,
             args=(
@@ -220,6 +229,8 @@ class DagFileProcessorProcess(AbstractDagFileProcessorProcess, LoggingMixin, Mul
         )
         self._process = process
         self._start_time = timezone.utcnow()
+
+        # 启动子进程
         process.start()
 
         # Close the child side of the pipe now the subprocess has started -- otherwise this would prevent it
@@ -558,6 +569,8 @@ class DagFileProcessor(LoggingMixin):
         """
         for request in callback_requests:
             self.log.debug("Processing Callback Request: %s", request)
+
+            # 根据请求类型，执行回调
             try:
                 if isinstance(request, TaskCallbackRequest):
                     self._execute_task_callbacks(dagbag, request)
@@ -576,8 +589,13 @@ class DagFileProcessor(LoggingMixin):
 
     @provide_session
     def _execute_dag_callbacks(self, dagbag: DagBag, request: DagCallbackRequest, session: Session):
+        # 获取dag
         dag = dagbag.dags[request.dag_id]
+
+        # 获取dag运行实例
         dag_run = dag.get_dagrun(execution_date=request.execution_date, session=session)
+
+        # 开始回调
         dag.handle_callback(
             dagrun=dag_run, success=not request.is_failure_callback, reason=request.msg, session=session
         )
@@ -630,15 +648,20 @@ class DagFileProcessor(LoggingMixin):
         :return: number of dags found, count of import errors
         :rtype: Tuple[int, int]
         """
+
+        # 日志输出，开始解析dag文件
         self.log.info("Processing file %s for tasks to queue", file_path)
 
         try:
+
+            # 初始化dagbag，并从dag文件路径中加载dag
             dagbag = DagBag(file_path, include_examples=False, include_smart_sensor=False)
         except Exception:  # pylint: disable=broad-except
             self.log.exception("Failed at reloading the DAG file %s", file_path)
             Stats.incr('dag_file_refresh_error', 1, 1)
             return 0, 0
 
+        # 如果 dagbag.dags 长度大于0，说明dag文件解析成功。
         if len(dagbag.dags) > 0:
             self.log.info("DAG(s) %s retrieved from %s", dagbag.dags.keys(), file_path)
         else:
@@ -646,11 +669,15 @@ class DagFileProcessor(LoggingMixin):
             self.update_import_errors(session, dagbag)
             return 0, len(dagbag.import_errors)
 
+        # 执行回调
+        # todo 解析dag的时候，就开始回调，是不是预检
         self.execute_callbacks(dagbag, callback_requests)
 
         # Save individual DAGs in the ORM
+        #  dag模型保存到数据库中
         dagbag.sync_to_db()
 
+        # 保存序列化的dag模型
         if pickle_dags:
             paused_dag_ids = DagModel.get_paused_dag_ids(dag_ids=dagbag.dag_ids)
 
@@ -662,6 +689,7 @@ class DagFileProcessor(LoggingMixin):
                 dag.pickle(session)
 
         # Record import errors into the ORM
+        # 将解析失败的dag保存到数据中
         try:
             self.update_import_errors(session, dagbag)
         except Exception:  # pylint: disable=broad-except
@@ -728,6 +756,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             self._log = log
 
         # Check what SQL backend we use
+        # 通过airflow.cfg 中“sql_alchemy_conn”配置项的开头，判断是用哪种类型的数据库
         sql_conn: str = conf.get('core', 'sql_alchemy_conn').lower()
         self.using_sqlite = sql_conn.startswith('sqlite')
         self.using_mysql = sql_conn.startswith('mysql')
@@ -1141,8 +1170,11 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             max_tis = self.executor.slots_available
         else:
             max_tis = min(self.max_tis_per_query, self.executor.slots_available)
+
+        # 计算待执行的任务列表
         queued_tis = self._executable_task_instances_to_queued(max_tis, session=session)
 
+        # 发送任务到executor
         self._enqueue_task_instances_with_queued_state(queued_tis)
         return len(queued_tis)
 
@@ -1249,20 +1281,27 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
 
         return len(event_buffer)
 
+    # scheduler job 真正执行逻辑的入口
     def _execute(self) -> None:
         self.log.info("Starting the scheduler")
 
         # DAGs can be pickled for easier remote execution by some executors
+        # do_pickle: 是否要序列化dag文件便于某些执行器远程执行。
         pickle_dags = self.do_pickle and self.executor_class not in UNPICKLEABLE_EXECUTORS
 
+        # 指定每个dag解析文件最多解析次数。（可以用来控制一个文件的解析次数，防止花费过度的资源解析文件）
         self.log.info("Processing each file at most %s times", self.num_times_parse_dags)
 
         # When using sqlite, we do not use async_mode
         # so the scheduler job and DAG parser don't access the DB at the same time.
+        # 如果 airflow.cfg 配置文件中的“sql_alchemy_conn”不是以sqlite开头，则使用异步模式
         async_mode = not self.using_sqlite
 
+        # dag解析文件超时参数，单位是秒
         processor_timeout_seconds: int = conf.getint('core', 'dag_file_processor_timeout')
         processor_timeout = timedelta(seconds=processor_timeout_seconds)
+
+        # 初始化dag文件解析的代理类。
         self.processor_agent = DagFileProcessorAgent(
             dag_directory=self.subdir,
             max_runs=self.num_times_parse_dags,
@@ -1274,15 +1313,22 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         )
 
         try:
+
+            # 获取该scheduler job的id（id 为airflow 元数据库中job表的id字段，为主键。）
             self.executor.job_id = self.id
+            # 根据execute的类型，启动executor, 在executor start中作一些初始化工作，
             self.executor.start()
 
+            # 注册信号，当信号SIGUSR1被传递给该进程时，进程从暂停中恢复，并根据预设，执行SIGTSTP的信号处理函数myHandler()
             self.register_signals()
 
+            # 启动解析dag的代理类
             self.processor_agent.start()
 
+            # 初始化execute的启动时间
             execute_start_time = timezone.utcnow()
 
+            # 运行scheduler主循环
             self._run_scheduler_loop()
 
             # Stop any processors
@@ -1345,9 +1391,11 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             raise ValueError("Processor agent is not started.")
         is_unit_test: bool = conf.getboolean('core', 'unit_test_mode')
 
+        # 初始化通用事件调度器
         timers = EventScheduler()
 
         # Check on start up, then every configured interval
+        # 重置或者认领 task instance
         self.adopt_or_reset_orphaned_tasks()
 
         timers.call_regular_interval(
@@ -1368,6 +1416,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         for loop_count in itertools.count(start=1):
             with Stats.timer() as timer:
 
+                # 如果使用的airflow的sqlite
                 if self.using_sqlite:
                     self.processor_agent.run_single_parsing_loop()
                     # For the sqlite case w/ 1 thread, wait until the processor
@@ -1375,6 +1424,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                     self.log.debug("Waiting for processors to finish since we're using sqlite")
                     self.processor_agent.wait_until_finished()
 
+                # 初始化数据库session
                 with create_session() as session:
                     num_queued_tis = self._do_scheduling(session)
 
@@ -1471,9 +1521,11 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         # Put a check in place to make sure we don't commit unexpectedly
         with prohibit_commit(session) as guard:
 
+            # 如果开启 use_job_schedule
             if settings.USE_JOB_SCHEDULE:
                 self._create_dagruns_for_dags(guard, session)
 
+            # 获取dag_runs
             dag_runs = self._get_next_dagruns_to_examine(session)
             # Bulk fetch the currently active dag runs for the dags we are
             # examining, rather than making one query per DagRun
@@ -1505,6 +1557,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             )
 
             for dag_id, execution_date in query:
+                # 保存正在运行的dagrun
                 active_runs_by_dag_id[dag_id].add(execution_date)
 
             for dag_run in dag_runs:
@@ -1515,6 +1568,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                 # But this would take care of the scenario when the Scheduler is restarted after DagRun is
                 # created and the DAG is deleted / renamed
                 try:
+                    # 开始调度dagrun
                     self._schedule_dag_run(dag_run, active_runs_by_dag_id.get(dag_run.dag_id, set()), session)
                 except SerializedDagNotFound:
                     self.log.exception("DAG '%s' not found in serialized_dag table", dag_run.dag_id)
@@ -1527,6 +1581,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             # END: schedule TIs
 
             try:
+                # 如果executor没有可用资源
                 if self.executor.slots_available <= 0:
                     # We know we can't do anything here, so don't even try!
                     self.log.debug("Executor full, skipping critical section")
@@ -1562,7 +1617,11 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
     @retry_db_transaction
     def _create_dagruns_for_dags(self, guard, session):
         """Find Dag Models needing DagRuns and Create Dag Runs with retries in case of OperationalError"""
+
+        # 从数据库中查找需要运行的dag
         query = DagModel.dags_needing_dagruns(session)
+
+        # 构造dag run
         self._create_dag_runs(query.all(), session)
 
         # commit the session - Release the write lock on DagModel table.
@@ -1578,6 +1637,8 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         # as DagModel.dag_id and DagModel.next_dagrun
         # This list is used to verify if the DagRun already exist so that we don't attempt to create
         # duplicate dag runs
+
+        # 从dag_models中取出已经构造好的dag_run
         active_dagruns = (
             session.query(DagRun.dag_id, DagRun.execution_date)
             .filter(
@@ -1590,11 +1651,14 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
 
         for dag_model in dag_models:
             try:
+
+                # 从dagbag中获取dag
                 dag = self.dagbag.get_dag(dag_model.dag_id, session=session)
             except SerializedDagNotFound:
                 self.log.exception("DAG '%s' not found in serialized_dag table", dag_model.dag_id)
                 continue
 
+            # 获取dag的hash值.
             dag_hash = self.dagbag.dags_hash.get(dag.dag_id)
             # Explicitly check if the DagRun already exists. This is an edge case
             # where a Dag Run is created but `DagModel.next_dagrun` and `DagModel.next_dagrun_create_after`
@@ -1604,6 +1668,8 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             # we need to run self._update_dag_next_dagruns if the Dag Run already exists or if we
             # create a new one. This is so that in the next Scheduling loop we try to create new runs
             # instead of falling in a loop of Integrity Error.
+
+            # 如果当前dag 没有dagrun, 则构建dagrun
             if (dag.dag_id, dag_model.next_dagrun) not in active_dagruns:
                 run = dag.create_dagrun(
                     run_type=DagRunType.SCHEDULED,
@@ -1616,14 +1682,17 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                     creating_job_id=self.id,
                 )
 
+                # 计算该dag下一次的执行时间
                 expected_start_date = dag.following_schedule(run.execution_date)
                 if expected_start_date:
+                    # 计算调度的时间间隔
                     schedule_delay = run.start_date - expected_start_date
                     Stats.timing(
                         f'dagrun.schedule_delay.{dag.dag_id}',
                         schedule_delay,
                     )
 
+        # 更新dag 下一个的 dagrun
         self._update_dag_next_dagruns(dag_models, session)
 
         # TODO[HA]: Should we do a session.flush() so we don't have to keep lots of state/object in
@@ -1692,6 +1761,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             self.log.error("Couldn't find dag %s in DagBag/DB!", dag_run.dag_id)
             return 0
 
+        # 如果运行时间超时
         if (
             dag_run.start_date
             and dag.dagrun_timeout
@@ -1711,6 +1781,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             self.log.info("Run %s of %s has timed-out", dag_run.run_id, dag_run.dag_id)
 
             # Work out if we should allow creating a new DagRun now?
+            # 是否立马新建一个dagrun
             self._update_dag_next_dagruns([session.query(DagModel).get(dag_run.dag_id)], session)
 
             callback_to_execute = DagCallbackRequest(
@@ -1726,10 +1797,12 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
 
             return 0
 
+        # dag_run的执行时间是否大于当前时间
         if dag_run.execution_date > timezone.utcnow() and not dag.allow_future_exec_dates:
             self.log.error("Execution date is in future: %s", dag_run.execution_date)
             return 0
 
+        # dag 运行次数是都大于限制
         if dag.max_active_runs:
             if (
                 len(currently_active_runs) >= dag.max_active_runs
@@ -1743,6 +1816,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                 )
                 return 0
 
+        # 验证dag是否发生变化。
         self._verify_integrity_if_dag_changed(dag_run=dag_run, session=session)
         # TODO[HA]: Rename update_state -> schedule_dag_run, ?? something else?
         schedulable_tis, callback_to_run = dag_run.update_state(session=session, execute_callbacks=False)
@@ -1820,6 +1894,8 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         :rtype: int
         """
         self.log.info("Resetting orphaned tasks for active dag runs")
+
+        # 获取scheduler 超时的时间限制
         timeout = conf.getint('scheduler', 'scheduler_health_check_threshold')
 
         for attempt in run_with_db_retries(logger=self.log):
@@ -1831,6 +1907,8 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                 )
                 self.log.debug("Calling SchedulerJob.adopt_or_reset_orphaned_tasks method")
                 try:
+
+                    # 从airflow 数据库中查找失败的task
                     num_failed = (
                         session.query(SchedulerJob)
                         .filter(
@@ -1844,7 +1922,10 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                         self.log.info("Marked %d SchedulerJob instances as failed", num_failed)
                         Stats.incr(self.__class__.__name__.lower() + '_end', num_failed)
 
+                    # job 的状态位
                     resettable_states = [State.SCHEDULED, State.QUEUED, State.RUNNING]
+
+
                     query = (
                         session.query(TI)
                         .filter(TI.state.in_(resettable_states))
@@ -1867,6 +1948,8 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                     tis_to_reset_or_adopt = with_row_locks(
                         query, of=TI, session=session, **skip_locked(session=session)
                     ).all()
+
+                    # 尝试领取被废弃SchedulerJob遗弃的正在运行的task instance
                     to_reset = self.executor.try_adopt_task_instances(tis_to_reset_or_adopt)
 
                     reset_tis_message = []

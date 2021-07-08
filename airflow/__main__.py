@@ -21,6 +21,7 @@
 """Main executable module"""
 
 import os
+import sys
 
 import argcomplete
 
@@ -34,10 +35,11 @@ def main():
         os.environ['KRB5CCNAME'] = conf.get('kerberos', 'ccache')
         os.environ['KRB5_KTNAME'] = conf.get('kerberos', 'keytab')
     # cmd 可以根据airflow脚本命令进行初始化，方便本地debug
-    cmd =["webserver", "--port", "8080"]
+    # cmd =["dags", "list"]
+    # 参数解析
     parser = cli_parser.get_parser()
     argcomplete.autocomplete(parser)
-    args = parser.parse_args(cmd)
+    args = parser.parse_args()
     args.func(args)
 
 

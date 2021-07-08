@@ -158,20 +158,27 @@ def list_py_file_paths(
     :return: a list of paths to Python files in the specified directory
     :rtype: list[unicode]
     """
+    # 是否要加载load_example，参数为true
     if include_examples is None:
         include_examples = conf.getboolean('core', 'LOAD_EXAMPLES')
+
+    # 对directory目录的类型进行判断
     file_paths: List[str] = []
     if directory is None:
         file_paths = []
     elif os.path.isfile(directory):
         file_paths = [str(directory)]
     elif os.path.isdir(directory):
+        # 如果是dag目录的话，会加载dag目录下的所有文件。
         file_paths.extend(find_dag_file_paths(directory, safe_mode))
+
+    # 如果要加载example下的dag文件的话，加载到file中。
     if include_examples:
         from airflow import example_dags
-
         example_dag_folder = example_dags.__path__[0]  # type: ignore
         file_paths.extend(list_py_file_paths(example_dag_folder, safe_mode, False, False))
+
+    # 加载smart sensor
     if include_smart_sensor:
         from airflow import smart_sensor_dags
 
@@ -184,13 +191,18 @@ def find_dag_file_paths(directory: Union[str, "pathlib.Path"], safe_mode: bool) 
     """Finds file paths of all DAG files."""
     file_paths = []
 
+    # 获取dag目录下所有的文件
     for file_path in find_path_from_directory(str(directory), ".airflowignore"):
         try:
             if not os.path.isfile(file_path):
                 continue
             _, file_ext = os.path.splitext(os.path.split(file_path)[-1])
+
+            # 如果不是.py文件或者zip压缩文件则过滤
             if file_ext != '.py' and not zipfile.is_zipfile(file_path):
                 continue
+
+            # 如果文件内容中不包含dag或者airflow的话
             if not might_contain_dag(file_path, safe_mode):
                 continue
 
@@ -224,4 +236,6 @@ def might_contain_dag(file_path: str, safe_mode: bool, zip_file: Optional[zipfil
         with open(file_path, 'rb') as dag_file:
             content = dag_file.read()
     content = content.lower()
+
+    # 判断文件是都包含dag或者airflow
     return all(s in content for s in (b'dag', b'airflow'))

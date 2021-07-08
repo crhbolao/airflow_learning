@@ -470,6 +470,7 @@ class DAG(LoggingMixin):
         :param dttm: utc datetime
         :return: utc datetime
         """
+        # 判断self.normalized_schedule_interval（标准化的时间间隔）是否为string ，
         if isinstance(self.normalized_schedule_interval, str):
             # we don't want to rely on the transitions created by
             # croniter as they are not always correct
@@ -478,6 +479,7 @@ class DAG(LoggingMixin):
             cron = croniter(self.normalized_schedule_interval, naive)
 
             # We assume that DST transitions happen on the minute/hour
+            # 判断是否是定点时间
             if not self.is_fixed_time_schedule():
                 # relative offset (eg. every 5 minutes)
                 delta = cron.get_next(datetime) - naive
@@ -2237,6 +2239,7 @@ class DagModel(Base):
         """
         log.debug("Deactivating DAGs (for which DAG files are deleted) from %s table ", cls.__tablename__)
 
+        # 从airflow元数据库中的dag表中,加载所有的dag模型
         dag_models = session.query(cls).all()
         try:
             for dag_model in dag_models:
@@ -2267,6 +2270,8 @@ class DagModel(Base):
         # TODO[HA]: Bake this query, it is run _A lot_
         # We limit so that _one_ scheduler doesn't try to do all the creation
         # of dag runs
+
+        # 从airflow元数据库dag表中查找需要运行的dagrun.
         query = (
             session.query(cls)
             .filter(
