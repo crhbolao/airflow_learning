@@ -1832,8 +1832,12 @@ class DAG(LoggingMixin):
             return
 
         log.info("Sync %s DAGs", len(dags))
+
+        # dag_id 对应 dag
         dag_by_ids = {dag.dag_id: dag for dag in dags}
+        # dag_ids
         dag_ids = set(dag_by_ids.keys())
+
         query = (
             session.query(DagModel)
             .options(joinedload(DagModel.tags, innerjoin=False))
@@ -1841,7 +1845,9 @@ class DAG(LoggingMixin):
         )
         orm_dags = with_row_locks(query, of=DagModel, session=session).all()
 
+        # 获取已经存在的dag_ids
         existing_dag_ids = {orm_dag.dag_id for orm_dag in orm_dags}
+        # 获取待保存的dag_ids
         missing_dag_ids = dag_ids.difference(existing_dag_ids)
 
         for missing_dag_id in missing_dag_ids:
@@ -1855,6 +1861,7 @@ class DAG(LoggingMixin):
             orm_dags.append(orm_dag)
 
         # Get the latest dag run for each existing dag as a single query (avoid n+1 query)
+        # 获取已经存在的dag的dagrun()
         most_recent_dag_runs = dict(
             session.query(DagRun.dag_id, func.max_(DagRun.execution_date))
             .filter(
@@ -1869,6 +1876,7 @@ class DAG(LoggingMixin):
         )
 
         # Get number of active dagruns for all dags we are processing as a single query.
+        # 获取已经存在的dag，对应正在运行runing的dagrun
         num_active_runs = dict(
             session.query(DagRun.dag_id, func.count('*'))
             .filter(
@@ -1882,6 +1890,7 @@ class DAG(LoggingMixin):
 
         for orm_dag in sorted(orm_dags, key=lambda d: d.dag_id):
             dag = dag_by_ids[orm_dag.dag_id]
+            # 判断该dag是不是子dag
             if dag.is_subdag:
                 orm_dag.is_subdag = True
                 orm_dag.fileloc = dag.parent_dag.fileloc  # type: ignore
@@ -1891,6 +1900,8 @@ class DAG(LoggingMixin):
                 orm_dag.is_subdag = False
                 orm_dag.fileloc = dag.fileloc
                 orm_dag.owners = dag.owner
+
+            # 初始化dag模型的一些属性
             orm_dag.is_active = True
             orm_dag.last_parsed_time = timezone.utcnow()
             orm_dag.default_view = dag.default_view
@@ -1917,6 +1928,7 @@ class DAG(LoggingMixin):
                         orm_dag.tags.append(dag_tag_orm)
                         session.add(dag_tag_orm)
 
+        # 如果需要保存dag code， 则将dag code 保存到数据库中
         if settings.STORE_DAG_CODE:
             DagCode.bulk_sync_to_db([dag.fileloc for dag in orm_dags])
 
@@ -1924,6 +1936,7 @@ class DAG(LoggingMixin):
         # decide when to commit
         session.flush()
 
+        # 保存子dag
         for dag in dags:
             cls.bulk_write_to_db(dag.subdags, session=session)
 

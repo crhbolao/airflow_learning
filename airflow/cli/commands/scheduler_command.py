@@ -37,8 +37,8 @@ def scheduler(args):
     print(settings.HEADER)
     # 初始化SchedulerJob
     # process_subdir：使用参数中的dag目录替换配置文件中的dags_folder
-    # todo num_runs ？？？
-    # todo do_pickle ？？？
+    # num_runs：scheduler loop 循环次数
+    # do_pickle：是否要序列化模型
     job = SchedulerJob(
         subdir=process_subdir(args.subdir),
         num_runs=args.num_runs,

@@ -99,6 +99,7 @@ class Pool(Base):
 
         pools: Dict[str, PoolStats] = {}
 
+        # 查找每个pool，以及对应的slots
         query = session.query(Pool.pool, Pool.slots)
 
         if lock_rows:
@@ -108,6 +109,7 @@ class Pool(Base):
         for (pool_name, total_slots) in pool_rows:
             pools[pool_name] = PoolStats(total=total_slots, running=0, queued=0, open=0)
 
+        # 查找task_instance中在queue以及running状态下的pool已经对应的slots.
         state_count_by_pool = (
             session.query(TaskInstance.pool, TaskInstance.state, func.sum(TaskInstance.pool_slots))
             .filter(TaskInstance.state.in_(list(EXECUTION_STATES)))
@@ -115,6 +117,7 @@ class Pool(Base):
         ).all()
 
         # calculate queued and running metrics
+        # 分别计算正在runing 和 queued 这两个状态中的slots
         count: int
         for (pool_name, state, count) in state_count_by_pool:
             stats_dict: Optional[PoolStats] = pools.get(pool_name)
@@ -129,6 +132,7 @@ class Pool(Base):
                 raise AirflowException(f"Unexpected state. Expected values: {EXECUTION_STATES}.")
 
         # calculate open metric
+        # 计算还剩下的slots
         for pool_name, stats_dict in pools.items():
             if stats_dict["total"] == -1:
                 # -1 means infinite

@@ -304,8 +304,10 @@ class DagBag(LoggingMixin):
         self.file_last_changed[filepath] = file_last_changed_on_disk
         return found_dags
 
-    # 从dag文件中解析dag
+    # 从dag文件中加载对应的module
     def _load_modules_from_file(self, filepath, safe_mode):
+
+        # 校验 dag 文件中是否存在 dag 或者 airflow
         if not might_contain_dag(filepath, safe_mode):
             # Don't want to spam user with skip messages
             if not self.has_logged:
@@ -314,6 +316,8 @@ class DagBag(LoggingMixin):
             return []
 
         self.log.debug("Importing %s", filepath)
+
+        # 获取dag文件的module
         org_mod_name, _ = os.path.splitext(os.path.split(filepath)[-1])
         path_hash = hashlib.sha1(filepath.encode('utf-8')).hexdigest()
         mod_name = f'unusual_prefix_{path_hash}_{org_mod_name}'
@@ -386,6 +390,13 @@ class DagBag(LoggingMixin):
         return mods
 
     def _process_modules(self, filepath, mods, file_last_changed_on_disk):
+        '''
+
+        :param filepath: dag文件路径
+        :param mods:   dag文件对应的module
+        :param file_last_changed_on_disk:   dag文件最后一次修改的时间
+        :return:
+        '''
         from airflow.models.dag import DAG  # Avoid circular import
 
         is_zipfile = zipfile.is_zipfile(filepath)
@@ -601,12 +612,14 @@ class DagBag(LoggingMixin):
                 return []
             try:
                 # We can't use bulk_write_to_db as we want to capture each error individually
+                # 将dag序列化到数据库中
                 dag_was_updated = SerializedDagModel.write_dag(
                     dag,
                     min_update_interval=settings.MIN_SERIALIZED_DAG_UPDATE_INTERVAL,
                     session=session,
                 )
                 if dag_was_updated:
+                    # dag文件同步权限
                     self._sync_perm_for_dag(dag, session=session)
                 return []
             except OperationalError:

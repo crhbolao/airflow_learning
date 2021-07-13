@@ -828,6 +828,8 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         :type new_state: airflow.utils.state.State
         """
         tis_changed = 0
+
+        # airflow taskinstance 和 dag run 进行关联
         query = (
             session.query(models.TaskInstance)
             .outerjoin(models.TaskInstance.dag_run)
@@ -900,13 +902,18 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
          a map from (dag_id, task_id) to # of task instances in the given state list
         :rtype: tuple[dict[str, int], dict[tuple[str, str], int]]
         """
+
+        # 从task_instance 表中查找在running或者queued状态的task_id，dag_id
         ti_concurrency_query: List[Tuple[str, str, int]] = (
             session.query(TI.task_id, TI.dag_id, func.count('*'))
             .filter(TI.state.in_(states))
             .group_by(TI.task_id, TI.dag_id)
         ).all()
+
         dag_map: DefaultDict[str, int] = defaultdict(int)
         task_map: DefaultDict[Tuple[str, str], int] = defaultdict(int)
+
+        # 统计dag_id对应的总个数，以及dag_id，task_id对应的总个数。
         for result in ti_concurrency_query:
             task_id, dag_id, count = result
             dag_map[dag_id] += count
@@ -928,16 +935,22 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
 
         # Get the pool settings. We get a lock on the pool rows, treating this as a "critical section"
         # Throws an exception if lock cannot be obtained, rather than blocking
+
+        # 获取当前slots_pool的使用状况
         pools = models.Pool.slots_stats(lock_rows=True, session=session)
 
         # If the pools are full, there is no point doing anything!
         # If _somehow_ the pool is overfull, don't let the limit go negative - it breaks SQL
+
+        # 计算目前允许最大剩余的slots
         pool_slots_free = max(0, sum(pool['open'] for pool in pools.values()))
 
+        # 如果没有剩余的slots, 则不调用任何task_instance
         if pool_slots_free == 0:
             self.log.debug("All pools are full!")
             return executable_tis
 
+        # 计算允许当前环境允许调度的最大ask_instance的个数
         max_tis = min(max_tis, pool_slots_free)
 
         # Get all task instances associated with scheduled
@@ -952,12 +965,18 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             .filter(TI.state == State.SCHEDULED)
             .options(selectinload('dag_model'))
         )
+
+        # 获取缺乏资源的pool
         starved_pools = [pool_name for pool_name, stats in pools.items() if stats['open'] <= 0]
+
+        # 如果有缺乏资源的pool，则需要过滤掉在该pool中运行的taskinstance
         if starved_pools:
             query = query.filter(not_(TI.pool.in_(starved_pools)))
 
+        # 过滤指定数目的task_instance
         query = query.limit(max_tis)
 
+        # 获取待调度的task instance 列表
         task_instances_to_examine: List[TI] = with_row_locks(
             query,
             of=TI,
@@ -967,14 +986,17 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         # TODO[HA]: This was wrong before anyway, as it only looked at a sub-set of dags, not everything.
         # Stats.gauge('scheduler.tasks.pending', len(task_instances_to_examine))
 
+        # 如果过滤后的task_instance数目为0，则返回空数据
         if len(task_instances_to_examine) == 0:
             self.log.debug("No tasks to consider for execution.")
             return executable_tis
 
         # Put one task instance on each line
+        # 输出日志
         task_instance_str = "\n\t".join([repr(x) for x in task_instances_to_examine])
         self.log.info("%s tasks up for execution:\n\t%s", len(task_instances_to_examine), task_instance_str)
 
+        # 记录每个pool中的task instance
         pool_to_task_instances: DefaultDict[str, List[models.Pool]] = defaultdict(list)
         for task_instance in task_instances_to_examine:
             pool_to_task_instances[task_instance.pool].append(task_instance)
@@ -982,6 +1004,8 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         # dag_id to # of running tasks and (dag_id, task_id) to # of running tasks.
         dag_concurrency_map: DefaultDict[str, int]
         task_concurrency_map: DefaultDict[Tuple[str, str], int]
+
+        # 从airflow task_instance 表中统计： dag_id及总个数，dag_id,task_id及总个数
         dag_concurrency_map, task_concurrency_map = self.__get_concurrency_maps(
             states=list(EXECUTION_STATES), session=session
         )
@@ -999,8 +1023,10 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                 self.log.warning("Tasks using non-existent pool '%s' will not be scheduled", pool)
                 continue
 
+            # 获取当前pool剩余的slot
             open_slots = pools[pool]["open"]
 
+            # 当前pool待调度的task instance 个数
             num_ready = len(task_instances)
             self.log.info(
                 "Figuring out tasks to run in Pool(name=%s) with %s open slots "
@@ -1010,12 +1036,15 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                 num_ready,
             )
 
+            # 对pool待调度的task instance重新排序
             priority_sorted_task_instances = sorted(
                 task_instances, key=lambda ti: (-ti.priority_weight, ti.execution_date)
             )
 
             num_starving_tasks = 0
             for current_index, task_instance in enumerate(priority_sorted_task_instances):
+
+                # 如果剩余slot小于0, 则统计没有调度的task instance个数，
                 if open_slots <= 0:
                     self.log.info("Not scheduling since there are %s open slots in pool %s", open_slots, pool)
                     # Can't schedule any more since there are no more open slots.
@@ -1028,6 +1057,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                 # reached.
                 dag_id = task_instance.dag_id
 
+                # 获取当前dag当前运行的task instance个数，判断有没有超过设置的阈值。
                 current_dag_concurrency = dag_concurrency_map[dag_id]
                 dag_concurrency_limit = task_instance.dag_model.concurrency
                 self.log.info(
@@ -1046,6 +1076,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                     )
                     continue
 
+                # 如果task运行个数有限制的话，则判断task的运行次数有没有超过设置的限制
                 task_concurrency_limit: Optional[int] = None
                 if task_instance.dag_model.has_task_concurrency_limits:
                     # Many dags don't have a task_concurrency, so where we can avoid loading the full
@@ -1069,6 +1100,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                             )
                             continue
 
+                # 如果task instache运行的pool slots超过剩余的，则不调度。
                 if task_instance.pool_slots > open_slots:
                     self.log.info(
                         "Not executing %s since it requires %s slots "
@@ -1083,8 +1115,13 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                     # Though we can execute tasks with lower priority if there's enough room
                     continue
 
+                # 则将待调度的task instance 添加到调度队列中。
                 executable_tis.append(task_instance)
+
+                # 更新当前pool 剩余的 slot。
                 open_slots -= task_instance.pool_slots
+
+                # 其相关的统计都加1
                 dag_concurrency_map[dag_id] += 1
                 task_concurrency_map[(task_instance.dag_id, task_instance.task_id)] += 1
 
@@ -1094,10 +1131,12 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         Stats.gauge('scheduler.tasks.running', num_tasks_in_executor)
         Stats.gauge('scheduler.tasks.executable', len(executable_tis))
 
+        # 日志输出
         task_instance_str = "\n\t".join([repr(x) for x in executable_tis])
         self.log.info("Setting the following tasks to queued state:\n\t%s", task_instance_str)
 
         # set TIs to queued state
+        # 将待执行task instance的元数据库队列修改为queue
         filter_for_tis = TI.filter_for_tis(executable_tis)
         session.query(TI).filter(filter_for_tis).update(
             # TODO[ha]: should we use func.now()? How does that work with DB timezone on mysql when it's not
@@ -1287,6 +1326,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
 
         # DAGs can be pickled for easier remote execution by some executors
         # do_pickle: 是否要序列化dag文件便于某些执行器远程执行。
+        # 判断 self.executor_class 是不是需要序列化，不在LOCAL_EXECUTOR、SEQUENTIAL_EXECUTOR、DASK_EXECUTOR中，即可序列化。
         pickle_dags = self.do_pickle and self.executor_class not in UNPICKLEABLE_EXECUTORS
 
         # 指定每个dag解析文件最多解析次数。（可以用来控制一个文件的解析次数，防止花费过度的资源解析文件）
@@ -1315,6 +1355,8 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
         try:
 
             # 获取该scheduler job的id（id 为airflow 元数据库中job表的id字段，为主键。）
+            # 从airflow.cfg配置文件中，初始化默认的Executor，并将scheduler jobId 赋值给executor
+            # todo executor.job_id 后续用来做什么
             self.executor.job_id = self.id
             # 根据execute的类型，启动executor, 在executor start中作一些初始化工作，
             self.executor.start()
@@ -1557,7 +1599,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
             )
 
             for dag_id, execution_date in query:
-                # 保存正在运行的dagrun
+                # 保存每个dag id 以及对应的执行时间
                 active_runs_by_dag_id[dag_id].add(execution_date)
 
             for dag_run in dag_runs:
@@ -1926,6 +1968,7 @@ class SchedulerJob(BaseJob):  # pylint: disable=too-many-instance-attributes
                     resettable_states = [State.SCHEDULED, State.QUEUED, State.RUNNING]
 
 
+                    # 过滤airflow task_instance表中，job_id为空或者job状态不是runing的taskinstance
                     query = (
                         session.query(TI)
                         .filter(TI.state.in_(resettable_states))
